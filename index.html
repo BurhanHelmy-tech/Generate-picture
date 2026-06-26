@@ -92,6 +92,12 @@
       </div>
     </div>
 
+    <label style="display:flex;align-items:center;gap:8px;margin-top:14px;color:var(--text)">
+      <input id="exactCrop" type="checkbox" style="width:auto" checked>
+      Crop to exact aspect ratio
+    </label>
+    <div class="hint">Models output e.g. 1344×768 (1.75:1) for "16:9". This trims it to exact 16:9.</div>
+
     <div class="row">
       <div>
         <label>Parallel</label>
@@ -222,11 +228,14 @@ async function callImagen(key,model,prompt,aspect,count,negative){
 }
 
 async function callGemini(key,model,prompt,aspect,count,negative){
-  // Gemini image models take a text prompt; aspect + negatives via instruction
+  // Gemini image models need aspect ratio via generationConfig.imageConfig (text hints are ignored)
   const url=`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`;
-  let text=prompt+` (aspect ratio ${aspect})`;
+  let text=prompt;
   if(negative) text+=`. Avoid: ${negative}.`;
-  const body={contents:[{parts:[{text}]}]};
+  const body={
+    contents:[{parts:[{text}]}],
+    generationConfig:{responseModalities:['IMAGE'],imageConfig:{aspectRatio:aspect}}
+  };
   const out=[];
   for(let i=0;i<count;i++){
     const res=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
@@ -245,6 +254,34 @@ function b64ToBlob(b64,mime){
   const bin=atob(b64); const len=bin.length; const arr=new Uint8Array(len);
   for(let i=0;i<len;i++) arr[i]=bin.charCodeAt(i);
   return new Blob([arr],{type:mime});
+}
+
+function aspectRatioVal(aspect){const p=aspect.split(':').map(Number);return p[0]/p[1];}
+
+// center-crop a generated image to the exact target ratio
+async function cropToRatio(b64,mime,aspect){
+  const ratio=aspectRatioVal(aspect);
+  const img=new Image();
+  await new Promise((res,rej)=>{img.onload=res;img.onerror=()=>rej(new Error('decode'));img.src='data:'+mime+';base64,'+b64;});
+  const W=img.naturalWidth,H=img.naturalHeight,cur=W/H;
+  let cw=W,ch=H;
+  if(cur>ratio) cw=Math.round(H*ratio);   // too wide -> trim sides
+  else if(cur<ratio) ch=Math.round(W/ratio); // too tall -> trim top/bottom
+  const sx=Math.round((W-cw)/2), sy=Math.round((H-ch)/2);
+  const c=document.createElement('canvas'); c.width=cw; c.height=ch;
+  c.getContext('2d').drawImage(img,sx,sy,cw,ch,0,0,cw,ch);
+  const outMime = mime.indexOf('jpeg')>-1?'image/jpeg':'image/png';
+  const dataUrl=c.toDataURL(outMime,0.95);
+  const blob=await (await fetch(dataUrl)).blob();
+  return {mime:outMime,blob,dataUrl};
+}
+
+// turn a raw {b64,mime} into {mime,blob,dataUrl}, cropping if requested
+async function finalizeImg(o,cfg){
+  if(cfg.exactCrop){
+    try{ return await cropToRatio(o.b64,o.mime,cfg.aspect); }catch(e){ /* fall back to raw */ }
+  }
+  return {mime:o.mime, blob:b64ToBlob(o.b64,o.mime), dataUrl:'data:'+o.mime+';base64,'+o.b64};
 }
 
 function render(){
@@ -298,15 +335,13 @@ async function generateOne(idx,cfg){
     const effPrompt = cfg.style ? results[idx].prompt+', '+cfg.style : results[idx].prompt;
     const imgs = await fn(cfg.key,cfg.model,effPrompt,cfg.aspect,cfg.count,cfg.negative);
     // first image becomes this card; extras append as new cards
-    const first=imgs[0];
-    results[idx].mime=first.mime;
-    results[idx].blob=b64ToBlob(first.b64,first.mime);
-    results[idx].dataUrl='data:'+first.mime+';base64,'+first.b64;
+    const f=await finalizeImg(imgs[0],cfg);
+    results[idx].mime=f.mime; results[idx].blob=f.blob; results[idx].dataUrl=f.dataUrl;
     results[idx].status='ok';
     for(let k=1;k<imgs.length;k++){
+      const g=await finalizeImg(imgs[k],cfg);
       results.push({prompt:results[idx].prompt+' ('+(k+1)+')',status:'ok',
-        mime:imgs[k].mime,blob:b64ToBlob(imgs[k].b64,imgs[k].mime),
-        dataUrl:'data:'+imgs[k].mime+';base64,'+imgs[k].b64});
+        mime:g.mime,blob:g.blob,dataUrl:g.dataUrl});
     }
   }catch(e){
     results[idx].status='err'; results[idx].error=e.message;
@@ -326,6 +361,7 @@ function readCfg(){
   return {
     key, type:$('apiType').value, model:$('model').value.trim(),
     negative:$('negative').value.trim(), style:styleText(),
+    exactCrop:$('exactCrop').checked,
     aspect:$('aspect').value, count:Math.max(1,Math.min(4,+$('count').value||1)),
     concurrency:Math.max(1,Math.min(8,+$('concurrency').value||2)),
     delay:Math.max(0,+$('delay').value||0)
