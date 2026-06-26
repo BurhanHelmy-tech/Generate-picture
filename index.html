@@ -104,6 +104,28 @@
     </div>
     <div class="hint">Lower parallel + higher delay if you hit rate limits.</div>
 
+    <label>Style</label>
+    <select id="style">
+      <option value="">None (use prompt as-is)</option>
+      <option value="photorealistic, high detail, natural lighting, sharp focus">Photorealistic</option>
+      <option value="digital illustration, clean linework, vibrant colors">Illustration</option>
+      <option value="minimalist, simple shapes, lots of negative space, flat design">Minimalist</option>
+      <option value="cinematic, dramatic lighting, film grain, shallow depth of field">Cinematic</option>
+      <option value="watercolor painting, soft washes, textured paper">Watercolor</option>
+      <option value="oil painting, visible brush strokes, rich texture">Oil painting</option>
+      <option value="3D render, octane, soft global illumination">3D render</option>
+      <option value="anime style, cel shading, expressive">Anime</option>
+      <option value="pixel art, 8-bit, limited palette">Pixel art</option>
+      <option value="line art, black and white, ink sketch">Line art</option>
+      <option value="__custom__">Custom…</option>
+    </select>
+    <input id="styleCustom" type="text" placeholder="describe your own style" style="display:none;margin-top:8px">
+    <div class="hint">Appended to every prompt.</div>
+
+    <label>Negative prompt (optional)</label>
+    <input id="negative" type="text" placeholder="blurry, text, watermark, extra fingers">
+    <div class="hint">Applied to every prompt. Things to avoid in the image.</div>
+
     <label>Prompts — one per line</label>
     <textarea id="prompts" placeholder="A red fox in a snowy forest, cinematic&#10;A neon city street at night, rain&#10;Watercolor portrait of an old sailor"></textarea>
     <div class="hint" id="promptCount">0 prompts</div>
@@ -136,12 +158,31 @@
 
 <script>
 const $ = id => document.getElementById(id);
-const KEY_LS='bgi_key', MODEL_LS='bgi_model', TYPE_LS='bgi_type';
+const KEY_LS='bgi_key', MODEL_LS='bgi_model', TYPE_LS='bgi_type', NEG_LS='bgi_neg', STY_LS='bgi_sty', STYC_LS='bgi_styc';
 
 // restore saved settings
 $('key').value   = localStorage.getItem(KEY_LS) || '';
 if(localStorage.getItem(TYPE_LS)) $('apiType').value = localStorage.getItem(TYPE_LS);
 $('model').value = localStorage.getItem(MODEL_LS) || defaultModel();
+$('negative').value = localStorage.getItem(NEG_LS) || '';
+$('negative').addEventListener('input',()=>localStorage.setItem(NEG_LS,$('negative').value));
+
+if(localStorage.getItem(STY_LS)!==null) $('style').value = localStorage.getItem(STY_LS);
+$('styleCustom').value = localStorage.getItem(STYC_LS) || '';
+function syncStyle(){
+  const custom = $('style').value==='__custom__';
+  $('styleCustom').style.display = custom?'block':'none';
+  localStorage.setItem(STY_LS,$('style').value);
+}
+$('style').addEventListener('change',syncStyle);
+$('styleCustom').addEventListener('input',()=>localStorage.setItem(STYC_LS,$('styleCustom').value));
+syncStyle();
+
+function styleText(){
+  const v=$('style').value;
+  if(v==='__custom__') return $('styleCustom').value.trim();
+  return v;
+}
 
 function defaultModel(){ return $('apiType').value==='imagen' ? 'imagen-4.0-generate-001' : 'gemini-2.5-flash-image'; }
 
@@ -167,9 +208,11 @@ const results=[]; // {prompt, blob, dataUrl, status}
 
 function sleep(ms){return new Promise(r=>setTimeout(r,ms));}
 
-async function callImagen(key,model,prompt,aspect,count){
+async function callImagen(key,model,prompt,aspect,count,negative){
   const url=`https://generativelanguage.googleapis.com/v1beta/models/${model}:predict?key=${encodeURIComponent(key)}`;
-  const body={instances:[{prompt}],parameters:{sampleCount:count,aspectRatio:aspect}};
+  const params={sampleCount:count,aspectRatio:aspect};
+  if(negative) params.negativePrompt=negative;
+  const body={instances:[{prompt}],parameters:params};
   const res=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
   if(!res.ok) throw new Error('HTTP '+res.status+': '+(await res.text()).slice(0,200));
   const data=await res.json();
@@ -178,10 +221,11 @@ async function callImagen(key,model,prompt,aspect,count){
   return preds.map(p=>({b64:p.bytesBase64Encoded, mime:p.mimeType||'image/png'}));
 }
 
-async function callGemini(key,model,prompt,aspect,count){
-  // Gemini image models take a text prompt; aspect via instruction
+async function callGemini(key,model,prompt,aspect,count,negative){
+  // Gemini image models take a text prompt; aspect + negatives via instruction
   const url=`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`;
-  const text=prompt+` (aspect ratio ${aspect})`;
+  let text=prompt+` (aspect ratio ${aspect})`;
+  if(negative) text+=`. Avoid: ${negative}.`;
   const body={contents:[{parts:[{text}]}]};
   const out=[];
   for(let i=0;i<count;i++){
@@ -251,7 +295,8 @@ async function generateOne(idx,cfg){
   results[idx].status='run'; results[idx].error=''; render();
   try{
     const fn = cfg.type==='imagen'?callImagen:callGemini;
-    const imgs = await fn(cfg.key,cfg.model,results[idx].prompt,cfg.aspect,cfg.count);
+    const effPrompt = cfg.style ? results[idx].prompt+', '+cfg.style : results[idx].prompt;
+    const imgs = await fn(cfg.key,cfg.model,effPrompt,cfg.aspect,cfg.count,cfg.negative);
     // first image becomes this card; extras append as new cards
     const first=imgs[0];
     results[idx].mime=first.mime;
@@ -280,6 +325,7 @@ function readCfg(){
   if(!key){alert('Enter your Gemini API key first.');return null;}
   return {
     key, type:$('apiType').value, model:$('model').value.trim(),
+    negative:$('negative').value.trim(), style:styleText(),
     aspect:$('aspect').value, count:Math.max(1,Math.min(4,+$('count').value||1)),
     concurrency:Math.max(1,Math.min(8,+$('concurrency').value||2)),
     delay:Math.max(0,+$('delay').value||0)
