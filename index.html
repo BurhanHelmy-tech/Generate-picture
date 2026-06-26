@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Batch Image Generator — Gemini / Imagen</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a21; --panel2:#1f232c; --border:#2a2f3a;
+    --text:#e6e8ee; --muted:#9aa3b2; --accent:#6d8bff; --accent2:#4a66d6;
+    --ok:#3ecf8e; --err:#ff6b6b; --warn:#ffcf5c;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+  header{padding:18px 24px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px}
+  header h1{font-size:18px;margin:0;font-weight:600}
+  header .tag{font-size:11px;color:var(--muted);border:1px solid var(--border);padding:2px 8px;border-radius:20px}
+  .wrap{display:grid;grid-template-columns:360px 1fr;gap:0;min-height:calc(100vh - 61px)}
+  .side{background:var(--panel);border-right:1px solid var(--border);padding:18px;overflow:auto}
+  .main{padding:18px 24px;overflow:auto}
+  label{display:block;font-size:12px;color:var(--muted);margin:14px 0 6px;font-weight:500}
+  input,select,textarea,button{font:inherit;color:var(--text)}
+  input[type=text],input[type=password],input[type=number],select,textarea{
+    width:100%;background:var(--panel2);border:1px solid var(--border);border-radius:8px;padding:9px 11px;outline:none}
+  input:focus,select:focus,textarea:focus{border-color:var(--accent)}
+  textarea{resize:vertical;min-height:200px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px}
+  .row{display:flex;gap:10px}
+  .row>div{flex:1}
+  .btn{background:var(--accent);border:none;border-radius:8px;padding:11px 16px;font-weight:600;cursor:pointer;color:#fff;width:100%}
+  .btn:hover{background:var(--accent2)}
+  .btn:disabled{opacity:.5;cursor:not-allowed}
+  .btn.secondary{background:var(--panel2);border:1px solid var(--border)}
+  .btn.secondary:hover{border-color:var(--accent)}
+  .hint{font-size:11px;color:var(--muted);margin-top:5px}
+  .bar{display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap}
+  .progress{flex:1;min-width:200px;height:8px;background:var(--panel2);border-radius:6px;overflow:hidden}
+  .progress>i{display:block;height:100%;width:0;background:var(--accent);transition:width .2s}
+  .stats{font-size:12px;color:var(--muted)}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:14px}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:10px;overflow:hidden;display:flex;flex-direction:column}
+  .card .thumb{aspect-ratio:1;background:var(--panel2);display:flex;align-items:center;justify-content:center;position:relative}
+  .card img{width:100%;height:100%;object-fit:cover;display:block}
+  .card .meta{padding:9px 11px;font-size:12px}
+  .card .meta .p{color:var(--text);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+  .card .meta .s{font-size:11px;margin-top:4px}
+  .s.ok{color:var(--ok)} .s.err{color:var(--err)} .s.run{color:var(--warn)} .s.wait{color:var(--muted)}
+  .spinner{width:26px;height:26px;border:3px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin 1s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .card .retry{position:absolute;inset:auto 6px 6px auto;background:rgba(0,0,0,.6);border:1px solid var(--border);color:#fff;font-size:11px;padding:3px 8px;border-radius:6px;cursor:pointer}
+  .empty{color:var(--muted);text-align:center;padding:60px 20px}
+  a.dl{color:var(--accent);text-decoration:none;font-size:11px}
+  details{margin-top:14px;border-top:1px solid var(--border);padding-top:10px}
+  summary{cursor:pointer;color:var(--muted);font-size:12px}
+</style>
+</head>
+<body>
+<header>
+  <h1>Batch Image Generator</h1>
+  <span class="tag">Gemini / Imagen API</span>
+</header>
+<div class="wrap">
+  <aside class="side">
+    <label>Gemini API Key</label>
+    <input id="key" type="password" placeholder="AIza..." autocomplete="off">
+    <div class="hint">Stored only in this browser (localStorage). Never sent anywhere except Google.</div>
+
+    <label>Model type</label>
+    <select id="apiType">
+      <option value="imagen">Imagen (:predict)</option>
+      <option value="gemini">Gemini Flash image / Nano Banana (:generateContent)</option>
+    </select>
+
+    <label>Model name</label>
+    <input id="model" type="text" value="imagen-4.0-generate-001">
+    <div class="hint" id="modelHint">Imagen models shut down Aug 17, 2026 — switch to Gemini Flash image after that.</div>
+
+    <div class="row">
+      <div>
+        <label>Aspect ratio</label>
+        <select id="aspect">
+          <option value="1:1">1:1 square</option>
+          <option value="3:4">3:4 portrait</option>
+          <option value="4:3">4:3 landscape</option>
+          <option value="9:16">9:16 tall</option>
+          <option value="16:9">16:9 wide</option>
+        </select>
+      </div>
+      <div>
+        <label>Per prompt</label>
+        <input id="count" type="number" min="1" max="4" value="1">
+      </div>
+    </div>
+
+    <div class="row">
+      <div>
+        <label>Parallel</label>
+        <input id="concurrency" type="number" min="1" max="8" value="2">
+      </div>
+      <div>
+        <label>Delay (ms)</label>
+        <input id="delay" type="number" min="0" step="100" value="500">
+      </div>
+    </div>
+    <div class="hint">Lower parallel + higher delay if you hit rate limits.</div>
+
+    <label>Prompts — one per line</label>
+    <textarea id="prompts" placeholder="A red fox in a snowy forest, cinematic&#10;A neon city street at night, rain&#10;Watercolor portrait of an old sailor"></textarea>
+    <div class="hint" id="promptCount">0 prompts</div>
+
+    <div style="margin-top:16px;display:flex;gap:10px">
+      <button class="btn" id="go">Generate</button>
+      <button class="btn secondary" id="stop" style="display:none">Stop</button>
+    </div>
+
+    <details>
+      <summary>About / help</summary>
+      <div class="hint" style="margin-top:8px">
+        Get a key at aistudio.google.com. Imagen needs a paid (Pro) tier.
+        ZIP download appears once images finish. Run this file locally — don't
+        host it publicly with your key in it.
+      </div>
+    </details>
+  </aside>
+
+  <main class="main">
+    <div class="bar">
+      <div class="progress"><i id="pbar"></i></div>
+      <div class="stats" id="stats">Idle</div>
+      <button class="btn secondary" id="zip" style="display:none;width:auto;padding:9px 16px">Download all (ZIP)</button>
+    </div>
+    <div id="grid" class="grid"></div>
+    <div id="empty" class="empty">Paste prompts and click Generate. Each line becomes an image.</div>
+  </main>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const KEY_LS='bgi_key', MODEL_LS='bgi_model', TYPE_LS='bgi_type';
+
+// restore saved settings
+$('key').value   = localStorage.getItem(KEY_LS) || '';
+if(localStorage.getItem(TYPE_LS)) $('apiType').value = localStorage.getItem(TYPE_LS);
+$('model').value = localStorage.getItem(MODEL_LS) || defaultModel();
+
+function defaultModel(){ return $('apiType').value==='imagen' ? 'imagen-4.0-generate-001' : 'gemini-2.5-flash-image'; }
+
+$('apiType').addEventListener('change',()=>{
+  $('model').value = defaultModel();
+  $('modelHint').textContent = $('apiType').value==='imagen'
+    ? 'Imagen models shut down Aug 17, 2026 — switch to Gemini Flash image after that.'
+    : 'e.g. gemini-2.5-flash-image (Nano Banana). Works via generateContent.';
+  localStorage.setItem(TYPE_LS,$('apiType').value);
+});
+$('key').addEventListener('input',()=>localStorage.setItem(KEY_LS,$('key').value.trim()));
+$('model').addEventListener('input',()=>localStorage.setItem(MODEL_LS,$('model').value.trim()));
+
+function parsePrompts(){
+  return $('prompts').value.split('\n').map(s=>s.trim()).filter(Boolean);
+}
+$('prompts').addEventListener('input',()=>{
+  $('promptCount').textContent = parsePrompts().length+' prompts';
+});
+
+let stopFlag=false;
+const results=[]; // {prompt, blob, dataUrl, status}
+
+function sleep(ms){return new Promise(r=>setTimeout(r,ms));}
+
+async function callImagen(key,model,prompt,aspect,count){
+  const url=`https://generativelanguage.googleapis.com/v1beta/models/${model}:predict?key=${encodeURIComponent(key)}`;
+  const body={instances:[{prompt}],parameters:{sampleCount:count,aspectRatio:aspect}};
+  const res=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  if(!res.ok) throw new Error('HTTP '+res.status+': '+(await res.text()).slice(0,200));
+  const data=await res.json();
+  const preds=data.predictions||[];
+  if(!preds.length) throw new Error('No image returned');
+  return preds.map(p=>({b64:p.bytesBase64Encoded, mime:p.mimeType||'image/png'}));
+}
+
+async function callGemini(key,model,prompt,aspect,count){
+  // Gemini image models take a text prompt; aspect via instruction
+  const url=`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(key)}`;
+  const text=prompt+` (aspect ratio ${aspect})`;
+  const body={contents:[{parts:[{text}]}]};
+  const out=[];
+  for(let i=0;i<count;i++){
+    const res=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    if(!res.ok) throw new Error('HTTP '+res.status+': '+(await res.text()).slice(0,200));
+    const data=await res.json();
+    const parts=(((data.candidates||[])[0]||{}).content||{}).parts||[];
+    const img=parts.find(p=>p.inlineData||p.inline_data);
+    if(!img) throw new Error('No image in response');
+    const inl=img.inlineData||img.inline_data;
+    out.push({b64:inl.data, mime:inl.mimeType||inl.mime_type||'image/png'});
+  }
+  return out;
+}
+
+function b64ToBlob(b64,mime){
+  const bin=atob(b64); const len=bin.length; const arr=new Uint8Array(len);
+  for(let i=0;i<len;i++) arr[i]=bin.charCodeAt(i);
+  return new Blob([arr],{type:mime});
+}
+
+function render(){
+  const grid=$('grid');
+  $('empty').style.display = results.length?'none':'block';
+  grid.innerHTML='';
+  results.forEach((r,i)=>{
+    const card=document.createElement('div'); card.className='card';
+    const thumb=document.createElement('div'); thumb.className='thumb';
+    if(r.status==='ok'){
+      const img=document.createElement('img'); img.src=r.dataUrl; thumb.appendChild(img);
+    } else if(r.status==='run'){
+      const sp=document.createElement('div'); sp.className='spinner'; thumb.appendChild(sp);
+    } else if(r.status==='err'){
+      const btn=document.createElement('button'); btn.className='retry'; btn.textContent='Retry';
+      btn.onclick=()=>retryOne(i); thumb.appendChild(btn);
+    }
+    const meta=document.createElement('div'); meta.className='meta';
+    const p=document.createElement('div'); p.className='p'; p.textContent=r.prompt; meta.appendChild(p);
+    const s=document.createElement('div');
+    s.className='s '+r.status;
+    s.textContent = r.status==='ok'?'Done':r.status==='run'?'Generating…':r.status==='err'?('Failed: '+r.error):'Waiting';
+    meta.appendChild(s);
+    if(r.status==='ok'){
+      const a=document.createElement('a'); a.className='dl'; a.href=r.dataUrl;
+      a.download=fileName(i); a.textContent='⬇ download'; meta.appendChild(document.createElement('br')); meta.appendChild(a);
+    }
+    card.appendChild(thumb); card.appendChild(meta); grid.appendChild(card);
+  });
+}
+
+function fileName(i){
+  const r=results[i];
+  const slug=r.prompt.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'').slice(0,40)||'image';
+  const ext=(r.mime||'image/png').split('/')[1]||'png';
+  return String(i+1).padStart(3,'0')+'-'+slug+'.'+ext;
+}
+
+function setProgress(){
+  const done=results.filter(r=>r.status==='ok'||r.status==='err').length;
+  const ok=results.filter(r=>r.status==='ok').length;
+  const total=results.length;
+  $('pbar').style.width=(total?done/total*100:0)+'%';
+  $('stats').textContent=`${done}/${total} processed · ${ok} ok`;
+}
+
+async function generateOne(idx,cfg){
+  results[idx].status='run'; results[idx].error=''; render();
+  try{
+    const fn = cfg.type==='imagen'?callImagen:callGemini;
+    const imgs = await fn(cfg.key,cfg.model,results[idx].prompt,cfg.aspect,cfg.count);
+    // first image becomes this card; extras append as new cards
+    const first=imgs[0];
+    results[idx].mime=first.mime;
+    results[idx].blob=b64ToBlob(first.b64,first.mime);
+    results[idx].dataUrl='data:'+first.mime+';base64,'+first.b64;
+    results[idx].status='ok';
+    for(let k=1;k<imgs.length;k++){
+      results.push({prompt:results[idx].prompt+' ('+(k+1)+')',status:'ok',
+        mime:imgs[k].mime,blob:b64ToBlob(imgs[k].b64,imgs[k].mime),
+        dataUrl:'data:'+imgs[k].mime+';base64,'+imgs[k].b64});
+    }
+  }catch(e){
+    results[idx].status='err'; results[idx].error=e.message;
+  }
+  render(); setProgress();
+}
+
+async function retryOne(i){
+  const cfg=readCfg(); if(!cfg) return;
+  await generateOne(i,cfg);
+  maybeShowZip();
+}
+
+function readCfg(){
+  const key=$('key').value.trim();
+  if(!key){alert('Enter your Gemini API key first.');return null;}
+  return {
+    key, type:$('apiType').value, model:$('model').value.trim(),
+    aspect:$('aspect').value, count:Math.max(1,Math.min(4,+$('count').value||1)),
+    concurrency:Math.max(1,Math.min(8,+$('concurrency').value||2)),
+    delay:Math.max(0,+$('delay').value||0)
+  };
+}
+
+function maybeShowZip(){
+  $('zip').style.display = results.some(r=>r.status==='ok')?'inline-block':'none';
+}
+
+async function run(){
+  const cfg=readCfg(); if(!cfg) return;
+  const prompts=parsePrompts();
+  if(!prompts.length){alert('Add at least one prompt.');return;}
+  stopFlag=false;
+  results.length=0;
+  prompts.forEach(p=>results.push({prompt:p,status:'wait'}));
+  render(); setProgress();
+  $('go').disabled=true; $('stop').style.display='inline-block'; $('zip').style.display='none';
+
+  // worker pool over the initial prompt indices
+  const queue=results.map((_,i)=>i);
+  let qi=0;
+  async function worker(){
+    while(qi<queue.length){
+      if(stopFlag) return;
+      const idx=queue[qi++];
+      await generateOne(idx,cfg);
+      if(cfg.delay) await sleep(cfg.delay);
+    }
+  }
+  const workers=Array.from({length:cfg.concurrency},()=>worker());
+  await Promise.all(workers);
+
+  $('go').disabled=false; $('stop').style.display='none';
+  maybeShowZip();
+  $('stats').textContent += stopFlag?' · stopped':' · finished';
+}
+
+async function makeZip(){
+  const zip=new JSZip();
+  results.forEach((r,i)=>{ if(r.status==='ok'&&r.blob) zip.file(fileName(i),r.blob); });
+  const blob=await zip.generateAsync({type:'blob'});
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download='generated-images.zip';
+  a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href),2000);
+}
+
+$('go').onclick=run;
+$('stop').onclick=()=>{stopFlag=true;$('stop').style.display='none';$('stats').textContent+=' · stopping…';};
+$('zip').onclick=makeZip;
+$('promptCount').textContent='0 prompts';
+</script>
+</body>
+</html>
