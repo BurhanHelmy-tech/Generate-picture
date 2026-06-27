@@ -165,6 +165,11 @@
     <div class="bar">
       <div class="progress"><i id="pbar"></i></div>
       <div class="stats" id="stats">Idle</div>
+      <select id="zipSize" style="display:none;width:auto;padding:8px 10px">
+        <option value="0">Original size</option>
+        <option value="1024">1K (1024px)</option>
+        <option value="2048">2K (2048px)</option>
+      </select>
       <button class="btn secondary" id="zip" style="display:none;width:auto;padding:9px 16px">Download all (ZIP)</button>
     </div>
     <div id="grid" class="grid"></div>
@@ -297,6 +302,29 @@ async function cropToRatio(b64,mime,aspect){
   return {mime:outMime,blob,dataUrl};
 }
 
+// scale an image so its longest edge = longEdge px (0 = leave as-is)
+async function resizeImage(srcDataUrl,mime,longEdge){
+  if(!longEdge) return {dataUrl:srcDataUrl,mime,blob:await (await fetch(srcDataUrl)).blob()};
+  const img=new Image();
+  await new Promise((res,rej)=>{img.onload=res;img.onerror=()=>rej(new Error('decode'));img.src=srcDataUrl;});
+  const W=img.naturalWidth,H=img.naturalHeight,scale=longEdge/Math.max(W,H);
+  const nw=Math.max(1,Math.round(W*scale)),nh=Math.max(1,Math.round(H*scale));
+  const c=document.createElement('canvas');c.width=nw;c.height=nh;
+  const ctx=c.getContext('2d');ctx.imageSmoothingEnabled=true;ctx.imageSmoothingQuality='high';
+  ctx.drawImage(img,0,0,nw,nh);
+  const outMime=mime.indexOf('jpeg')>-1?'image/jpeg':'image/png';
+  const dataUrl=c.toDataURL(outMime,0.95);
+  return {dataUrl,mime:outMime,blob:await (await fetch(dataUrl)).blob(),w:nw,h:nh};
+}
+
+// download one result at a given size (0=original,1024=1K,2048=2K)
+async function downloadAt(i,longEdge){
+  const r=results[i]; if(!r||r.status!=='ok') return;
+  const out=await resizeImage(r.dataUrl,r.mime,longEdge);
+  const a=document.createElement('a');
+  a.href=out.dataUrl; a.download=fileName(i,longEdge); a.click();
+}
+
 // turn a raw {b64,mime} into {mime,blob,dataUrl}, cropping if requested
 async function finalizeImg(o,cfg){
   if(cfg.exactCrop){
@@ -327,18 +355,24 @@ function render(){
     s.textContent = r.status==='ok'?'Done':r.status==='run'?'Generating…':r.status==='err'?('Failed: '+r.error):'Waiting';
     meta.appendChild(s);
     if(r.status==='ok'){
-      const a=document.createElement('a'); a.className='dl'; a.href=r.dataUrl;
-      a.download=fileName(i); a.textContent='⬇ download'; meta.appendChild(document.createElement('br')); meta.appendChild(a);
+      meta.appendChild(document.createElement('br'));
+      const dl=document.createElement('span'); dl.className='dl'; dl.style.cursor='pointer';
+      dl.textContent='⬇ original'; dl.onclick=()=>downloadAt(i,0); meta.appendChild(dl);
+      const k1=document.createElement('span'); k1.className='dl'; k1.style.cssText='cursor:pointer;margin-left:10px';
+      k1.textContent='1K'; k1.onclick=()=>downloadAt(i,1024); meta.appendChild(k1);
+      const k2=document.createElement('span'); k2.className='dl'; k2.style.cssText='cursor:pointer;margin-left:10px';
+      k2.textContent='2K'; k2.onclick=()=>downloadAt(i,2048); meta.appendChild(k2);
     }
     card.appendChild(thumb); card.appendChild(meta); grid.appendChild(card);
   });
 }
 
-function fileName(i){
+function fileName(i,longEdge){
   const r=results[i];
   const slug=r.prompt.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'').slice(0,40)||'image';
   const ext=(r.mime||'image/png').split('/')[1]||'png';
-  return String(i+1).padStart(3,'0')+'-'+slug+'.'+ext;
+  const sz = longEdge===1024?'-1k':longEdge===2048?'-2k':'';
+  return String(i+1).padStart(3,'0')+'-'+slug+sz+'.'+ext;
 }
 
 function setProgress(){
@@ -390,7 +424,9 @@ function readCfg(){
 }
 
 function maybeShowZip(){
-  $('zip').style.display = results.some(r=>r.status==='ok')?'inline-block':'none';
+  const show = results.some(r=>r.status==='ok');
+  $('zip').style.display = show?'inline-block':'none';
+  $('zipSize').style.display = show?'inline-block':'none';
 }
 
 async function run(){
@@ -401,7 +437,7 @@ async function run(){
   results.length=0;
   prompts.forEach(p=>results.push({prompt:p,status:'wait'}));
   render(); setProgress();
-  $('go').disabled=true; $('stop').style.display='inline-block'; $('zip').style.display='none';
+  $('go').disabled=true; $('stop').style.display='inline-block'; $('zip').style.display='none'; $('zipSize').style.display='none';
 
   // worker pool over the initial prompt indices
   const queue=results.map((_,i)=>i);
@@ -423,14 +459,21 @@ async function run(){
 }
 
 async function makeZip(){
+  const longEdge=+$('zipSize').value||0;
+  $('zip').disabled=true; const label=$('zip').textContent; $('zip').textContent='Zipping…';
   const zip=new JSZip();
-  results.forEach((r,i)=>{ if(r.status==='ok'&&r.blob) zip.file(fileName(i),r.blob); });
+  for(let i=0;i<results.length;i++){
+    const r=results[i]; if(r.status!=='ok'||!r.blob) continue;
+    const out=await resizeImage(r.dataUrl,r.mime,longEdge);
+    zip.file(fileName(i,longEdge),out.blob);
+  }
   const blob=await zip.generateAsync({type:'blob'});
   const a=document.createElement('a');
   a.href=URL.createObjectURL(blob);
-  a.download='generated-images.zip';
+  a.download = longEdge?('generated-images-'+(longEdge===2048?'2k':'1k')+'.zip'):'generated-images.zip';
   a.click();
   setTimeout(()=>URL.revokeObjectURL(a.href),2000);
+  $('zip').disabled=false; $('zip').textContent=label;
 }
 
 $('go').onclick=run;
